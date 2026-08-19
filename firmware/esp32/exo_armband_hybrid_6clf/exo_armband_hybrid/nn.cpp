@@ -5,7 +5,82 @@
 
 
 NeuralNet::NeuralNet() {
-    loaded_ = false;
+    // Nothing to init; weights are loaded later via loadFromLittleFS().
+}
+
+NeuralNet::~NeuralNet() {
+    delete[] _weights;
+    delete[] _biases;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Load weights + biases + scaler from LittleFS
+//
+// File layout (see docs/FIRMWARE_PROTOCOL.md 4-1):
+//   W0 b0 W1 b1 W2 b2 means stds   (float32, interleaved per layer)
+//
+// _weights/_biases keep the layout predict()/denseLayer() already expect
+// (all weights concatenated, then all biases concatenated) — this function
+// is what translates between the two layouts while reading.
+// ═══════════════════════════════════════════════════════════════════════
+bool NeuralNet::loadFromLittleFS(const char* path, Preprocessor& preproc) {
+    // Element counts derived from MODEL_TOPOLOGY so this doesn't need to
+    // change if the topology ever does.
+    int totalWeights = 0;
+    int totalBiases  = 0;
+    for (int L = 0; L < MODEL_N_LAYERS - 1; L++) {
+        totalWeights += MODEL_TOPOLOGY[L] * MODEL_TOPOLOGY[L + 1];
+        totalBiases  += MODEL_TOPOLOGY[L + 1];
+    }
+    const int nFeatures = MODEL_TOPOLOGY[0];  // scaler mean/std length
+
+    const size_t EXPECTED_BYTES =
+        (size_t)(totalWeights + totalBiases + 2 * nFeatures) * sizeof(float);
+
+    File f = LittleFS.open(path, "r");
+    if (!f) return false;
+
+    if ((size_t)f.size() != EXPECTED_BYTES) {
+        f.close();
+        return false;
+    }
+
+    float* newWeights = new float[totalWeights];
+    float* newBiases  = new float[totalBiases];
+    float* means      = new float[nFeatures];
+    float* stds       = new float[nFeatures];
+
+    bool ok = true;
+    int wOff = 0, bOff = 0;
+    for (int L = 0; L < MODEL_N_LAYERS - 1 && ok; L++) {
+        int wCount = MODEL_TOPOLOGY[L] * MODEL_TOPOLOGY[L + 1];
+        int bCount = MODEL_TOPOLOGY[L + 1];
+        ok = ok && f.read((uint8_t*)(newWeights + wOff), wCount * sizeof(float)) == wCount * sizeof(float);
+        ok = ok && f.read((uint8_t*)(newBiases  + bOff), bCount * sizeof(float)) == bCount * sizeof(float);
+        wOff += wCount;
+        bOff += bCount;
+    }
+    ok = ok && f.read((uint8_t*)means, nFeatures * sizeof(float)) == nFeatures * sizeof(float);
+    ok = ok && f.read((uint8_t*)stds,  nFeatures * sizeof(float)) == nFeatures * sizeof(float);
+    f.close();
+
+    if (ok) {
+        // Swap in the newly loaded weights only once everything above
+        // succeeded, and only now free whatever was loaded before.
+        delete[] _weights;
+        delete[] _biases;
+        _weights = newWeights;
+        _biases  = newBiases;
+        preproc.setStandardizer(means, stds);
+        _loaded = true;
+    } else {
+        delete[] newWeights;
+        delete[] newBiases;
+    }
+    delete[] means;
+    delete[] stds;
+    return ok;
 }
 
 
@@ -77,13 +152,15 @@ void NeuralNet::denseLayer(const float* in, int in_dim,
 // Full forward pass
 // ═══════════════════════════════════════════════════════════════════════
 void NeuralNet::predict(const float* input, float* output) {
+    if (!_loaded) return;  // no weights yet — caller should check isLoaded() first
+
     // Copy input to buf_a
     int in_dim = MODEL_TOPOLOGY[0];
     for (int i = 0; i < in_dim; i++) buf_a[i] = input[i];
 
     // Ping-pong through hidden layers
-    const float* w_ptr = weights_;
-    const float* b_ptr = biases_;
+    const float* w_ptr = _weights;
+    const float* b_ptr = _biases;
 
     float* cur_in  = buf_a;
     float* cur_out = buf_b;
@@ -124,88 +201,4 @@ int NeuralNet::argmax(const float* output, int n) {
         }
     }
     return best;
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════
-// Load weights+biases+standardizer from LittleFS.
-//
-// File layout (written by the BLE weights-receive handler once CRC-checked):
-//   [W0][b0][W1][b1]...[W_{n-1}][b_{n-1}][means][stds]   all float32
-// i.e. weights and biases interleaved PER LAYER, matching how the PC app
-// serializes a Keras model. predict() above instead expects weights_[]/
-// biases_[] as two arrays each concatenated ACROSS layers, so this function
-// reshuffles while reading.
-// ═══════════════════════════════════════════════════════════════════════
-bool NeuralNet::loadFromLittleFS(const char* path, Preprocessor& preproc) {
-    loaded_ = false;
-
-    File f = LittleFS.open(path, "r");
-    if (!f) {
-        Serial.printf("[nn] loadFromLittleFS: cannot open %s\n", path);
-        return false;
-    }
-
-    size_t total_weights = 0, total_biases = 0;
-    for (int L = 0; L < MODEL_N_LAYERS - 1; L++) {
-        total_weights += (size_t)MODEL_TOPOLOGY[L] * (size_t)MODEL_TOPOLOGY[L + 1];
-        total_biases  += (size_t)MODEL_TOPOLOGY[L + 1];
-    }
-    if (total_weights != (size_t)NN_TOTAL_WEIGHTS || total_biases != (size_t)NN_TOTAL_BIASES) {
-        // MODEL_TOPOLOGY and the NN_TOTAL_* constants have drifted apart.
-        Serial.println("[nn] loadFromLittleFS: topology/size constants mismatch");
-        f.close();
-        return false;
-    }
-
-    size_t expected_bytes = (total_weights + total_biases + 2 * (size_t)N_FEATURES) * sizeof(float);
-    if ((size_t)f.size() != expected_bytes) {
-        Serial.printf("[nn] loadFromLittleFS: size mismatch (file=%u expected=%u)\n",
-                      (unsigned)f.size(), (unsigned)expected_bytes);
-        f.close();
-        return false;
-    }
-
-    float means[N_FEATURES];
-    float stds[N_FEATURES];
-
-    size_t w_off = 0, b_off = 0;
-    for (int L = 0; L < MODEL_N_LAYERS - 1; L++) {
-        int in_d  = MODEL_TOPOLOGY[L];
-        int out_d = MODEL_TOPOLOGY[L + 1];
-        size_t w_bytes = (size_t)in_d * (size_t)out_d * sizeof(float);
-        size_t b_bytes = (size_t)out_d * sizeof(float);
-
-        if (f.read((uint8_t*)(weights_ + w_off), w_bytes) != w_bytes) {
-            Serial.println("[nn] loadFromLittleFS: short read (weights)");
-            f.close();
-            return false;
-        }
-        w_off += (size_t)in_d * (size_t)out_d;
-
-        if (f.read((uint8_t*)(biases_ + b_off), b_bytes) != b_bytes) {
-            Serial.println("[nn] loadFromLittleFS: short read (biases)");
-            f.close();
-            return false;
-        }
-        b_off += out_d;
-    }
-
-    if (f.read((uint8_t*)means, N_FEATURES * sizeof(float)) != N_FEATURES * sizeof(float)) {
-        Serial.println("[nn] loadFromLittleFS: short read (means)");
-        f.close();
-        return false;
-    }
-    if (f.read((uint8_t*)stds, N_FEATURES * sizeof(float)) != N_FEATURES * sizeof(float)) {
-        Serial.println("[nn] loadFromLittleFS: short read (stds)");
-        f.close();
-        return false;
-    }
-
-    f.close();
-
-    preproc.setStandardizer(means, stds);
-    loaded_ = true;
-    Serial.println("[nn] loadFromLittleFS: model loaded OK");
-    return true;
 }

@@ -45,7 +45,8 @@ class Preprocessor {
 public:
     Preprocessor();
 
-    // Main pipeline: raw int samples -> 58 standardized features.
+    // Main pipeline: raw int samples -> N_FEATURES standardized features
+    // (132 for the current 8ch config; 58 was the old 4ch config).
     // emg_window: WINDOW_SIZE rows x N_CHANNEL columns (int16 from ADC).
     // out_features: must point to at least N_FEATURES floats.
     void process(int16_t emg_window[WINDOW_SIZE][N_CHANNEL],
@@ -66,11 +67,13 @@ public:
     // Reset filter & envelope state (useful for debug, normally not used).
     void resetState();
 
-    // Set the standardizer (scaler mean_/scale_) used by standardize().
-    // Called by NeuralNet::loadFromLittleFS() after parsing the trailing
-    // means/stds floats out of /weights.bin. Until this is called at least
-    // once, means_/stds_ default to 0/1 (no-op standardization).
+    // Load StandardScaler mean/std (132 each) — called by
+    // NeuralNet::loadFromLittleFS() after it parses the scaler section of
+    // /weights.bin. Copies the values in (caller retains ownership of the
+    // buffers passed in). Until this is called, standardize() uses a
+    // no-op default (mean=0, std=1) so nothing divides by zero.
     void setStandardizer(const float* means, const float* stds);
+    bool hasStandardizer() const { return _hasStandardizer; }
 
 private:
     // ── Filter coefficients (must match Python butter(4, [35,300]/450)) ─
@@ -95,10 +98,10 @@ private:
     float features_raw[N_FEATURES];
     float features_std[N_FEATURES];
 
-    // ── Standardizer (was compile-time means.h/stds.h, now set at runtime
-    //    via setStandardizer() from the BLE-received /weights.bin) ────────
-    float means_[N_FEATURES] = {0};
-    float stds_[N_FEATURES];  // initialized to 1 in the constructor
+    // ── Standard scaler, set at runtime via setStandardizer() ──────────
+    float _standardizerMeans[N_FEATURES];
+    float _standardizerStds[N_FEATURES];
+    bool  _hasStandardizer = false;
 
     // ── FFT workspace ──────────────────────────────────────────────────
     float fft_real[FFT_SIZE];

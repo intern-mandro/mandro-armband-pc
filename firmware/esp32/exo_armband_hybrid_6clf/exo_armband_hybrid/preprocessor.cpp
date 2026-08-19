@@ -34,16 +34,11 @@ const float Preprocessor::bp_zi[BP_TAPS - 1] = {
 // ═══════════════════════════════════════════════════════════════════════
 Preprocessor::Preprocessor() {
     resetState();
+    // Safe defaults until setStandardizer() is called (avoids div-by-zero
+    // if standardize() somehow runs before a scaler is loaded).
     for (int i = 0; i < N_FEATURES; i++) {
-        stds_[i] = 1.0f;  // avoid divide-by-zero before a model is loaded
-    }
-}
-
-
-void Preprocessor::setStandardizer(const float* means, const float* stds) {
-    for (int i = 0; i < N_FEATURES; i++) {
-        means_[i] = means[i];
-        stds_[i]  = stds[i];
+        _standardizerMeans[i] = 0.0f;
+        _standardizerStds[i]  = 1.0f;
     }
 }
 
@@ -524,19 +519,27 @@ void Preprocessor::extractTSDFeatures() {
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 8 — Standardization
-// Uses means_/stds_, set at runtime via setStandardizer() (was compile-time
-// STANDARDIZER_MEANS/STANDARDIZER_STDS from means.h/stds.h before the BLE
-// weights-transfer change).
+// Mean/std are no longer compiled in (means.h/stds.h removed) — they're
+// loaded at boot from LittleFS via setStandardizer(), same as the NN
+// weights in nn.cpp. See docs/FIRMWARE_PROTOCOL.md 4-1.
 //
 // Numerically robust form: (x/std) - (mean/std)
 // to avoid catastrophic cancellation on features with large dynamics
 // (e.g. tpow which can reach 2.9M).
 // ═══════════════════════════════════════════════════════════════════════
+void Preprocessor::setStandardizer(const float* means, const float* stds) {
+    for (int i = 0; i < N_FEATURES; i++) {
+        _standardizerMeans[i] = means[i];
+        _standardizerStds[i]  = stds[i];
+    }
+    _hasStandardizer = true;
+}
+
 void Preprocessor::standardize() {
     for (int i = 0; i < N_FEATURES; i++) {
-        float inv_std = 1.0f / stds_[i];
+        float inv_std = 1.0f / _standardizerStds[i];
         features_std[i] = features_raw[i] * inv_std
-                        - means_[i] * inv_std;
+                        - _standardizerMeans[i] * inv_std;
     }
 }
 

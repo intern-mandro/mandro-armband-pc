@@ -145,7 +145,9 @@ def main():
 
         f.write(f"const int MODEL_N_LAYERS = {len(topology)};\n\n")
 
-        f.write(f"const int MODEL_TOPOLOGY[{len(topology)}] = {{\n")
+        # constexpr (not just const) so nn.h's static_assert on NN_MAX_WIDTH
+        # can use MODEL_TOPOLOGY[0] as a constant expression.
+        f.write(f"constexpr int MODEL_TOPOLOGY[{len(topology)}] = {{\n")
         f.write(f"    {fmt_int_array(topology)}\n")
         f.write("};\n\n")
 
