@@ -43,6 +43,11 @@ client_app/assets/gestures/*.gif
 # arduino-cli build artifacts
 arduino-cli_1.5.1_Windows_64bit/
 
+# PyInstaller build artifacts
+client_app/build/
+client_app/dist/
+client_app/*.spec
+
 # Subject registry may contain personal data - keep it out of git
 client_app/subjects.xlsx
 client_app/sessions.xlsx
