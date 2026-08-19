@@ -60,3 +60,5 @@ firmware/esp32/exo_armband_hybrid_6clf/exo_armband_hybrid/stds.h
 firmware/teensy/means.h
 firmware/teensy/MODEL.h
 firmware/teensy/stds.h
+
+/docs 
