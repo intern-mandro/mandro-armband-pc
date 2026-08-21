@@ -47,6 +47,7 @@
 
 #define PAIR_HDR         0xE0
 #define PAIR_PACKET_LEN  8       // 헤더 1B + MAC 6B + 체크섬 1B = 8B
+#define PAIR_HDR_CLEAR   0xE1    // 저장된 마스터 MAC 삭제 명령 (1바이트 단독 write)
 
 // =========================
 // 설정 (UNCHANGED FROM RECORDER)
@@ -398,6 +399,24 @@ class PairCharCallbacks : public BLECharacteristicCallbacks  {
 
     const uint8_t* d = c->getData();
     size_t len = c->getLength();
+
+    // 0. CLEAR 명령: 1바이트(0xE1)만 오면 저장된 마스터 MAC을 지운다.
+    //    NVS 자체에서 키를 지워야 hasMasterMac이 정직하게 false가 되고
+    //    onRead()가 "비어있음"을 돌려준다 — 00:00:.. 같은 가짜 MAC을
+    //    저장하는 방식은 "페어링 안 됨"과 "그 MAC으로 페어링됨"을 구분 못
+    //    하게 만들어서 쓰지 않는다.
+    if (len == 1 && d[0] == PAIR_HDR_CLEAR) {
+      pairPrefs.begin("pairing", false);
+      pairPrefs.remove("master_mac");
+      pairPrefs.end();
+
+      memset(masterMac, 0, sizeof(masterMac));
+      hasMasterMac = false;
+
+      notifyPairResult("OK:CLEAR");
+      Serial.println("# PAIR: 저장된 마스터 MAC 삭제됨");
+      return;
+    }
 
     // 1. 길이 + 헤더 검사
     if (len != PAIR_PACKET_LEN || d[0] != PAIR_HDR) {

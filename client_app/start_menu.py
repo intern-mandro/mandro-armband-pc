@@ -1,12 +1,15 @@
 """
 start_menu.py
 =============
-Landing menu shown before anything else. Three entry points:
-  - New subject          -> phases 1 to 5 workflow
-  - Load an old session  -> workflow to be built later
+Landing menu shown before anything else. Entry points:
+  - New subject           -> phases 1 to 5 workflow
+  - Load an old session   -> workflow to be built later
+  - Browse takes          -> review recorded takes
+  - Subjects directory    -> per-subject session/take counts
+  - Pair robotic hand     -> BLE MAC pairing (bracelet <-> hand), standalone
   - EMG sensors debugging -> live visualization only (no recording)
 
-The menu is purely a router: it takes three zero-arg callbacks and calls the
+The menu is purely a router: it takes zero-arg callbacks and calls the
 matching one when a card is clicked. RootWindow (main.py) wires them.
 """
 
@@ -51,7 +54,7 @@ class _MenuCard(QFrame):
 
 
 class StartMenu(QWidget):
-    def __init__(self, on_new, on_load, on_debug, on_subjects, on_browse):
+    def __init__(self, on_new, on_load, on_debug, on_subjects, on_browse, on_pair_hand):
         super().__init__()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(80, 40, 80, 40)
@@ -81,6 +84,11 @@ class StartMenu(QWidget):
             "Subjects directory",
             "Show the number of sessions and takes per subject.",
             "#a55eea", on_subjects))
+        outer.addWidget(_MenuCard(
+            "Pair robotic hand",
+            "Send the robotic hand's BLE MAC to the bracelet so it can "
+            "auto-reconnect once the PC disconnects.",
+            "#ff6b6b", on_pair_hand))
         outer.addWidget(_MenuCard(
             "EMG sensors debugging",
             "Live signal visualization only - no recording.",

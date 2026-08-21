@@ -33,6 +33,7 @@ from app_window import AppWindow
 from dashboard_ui import EMGDashboard
 from load_session import LoadSessionScreen, SubjectsScreen
 from browse_takes import BrowseTakesScreen
+from pair_hand_screen import PairHandScreen
 
 
 class RootWindow(QMainWindow):
@@ -64,7 +65,7 @@ class RootWindow(QMainWindow):
 
         self.menu = StartMenu(self.show_workflow, self.show_load,
                               self.show_debug, self.show_subjects,
-                              self.show_browse)
+                              self.show_browse, self.show_pair_hand)
         self._add_page(self.menu)
 
         # Lazily created screens.
@@ -73,6 +74,7 @@ class RootWindow(QMainWindow):
         self.subjects_screen = None
         self.debug = None
         self.browse_screen = None
+        self.pair_hand_screen = None
 
         self.setStyleSheet("""
             QMainWindow, QWidget {
@@ -192,6 +194,13 @@ class RootWindow(QMainWindow):
         # Bring the workflow window to the front
         self.topbar.show()
         self._show_page(self.workflow)
+
+    def show_pair_hand(self):
+        if self.pair_hand_screen is None:
+            self.pair_hand_screen = PairHandScreen()
+            self._add_page(self.pair_hand_screen)
+        self.topbar.show()
+        self._show_page(self.pair_hand_screen)
 
     def show_subjects(self):
         if self.subjects_screen is None:

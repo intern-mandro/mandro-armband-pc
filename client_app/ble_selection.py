@@ -1,18 +1,25 @@
 """
 ble_selection.py
 ================
-Lets the user pick a specific bracelet when several are in range. Shows every
-nearby BLE device (unfiltered) - useful for debugging when the bracelet isn't
-showing up under its expected name (ESP32S3_FAST_BLE), e.g. right after a
-fresh flash or with an unusual advertising state. Entries whose name matches
-are marked so the real bracelet is still easy to spot among the noise.
+Lets the user pick a specific BLE device when several are in range. Shows
+every nearby BLE device (unfiltered) - useful for debugging when the target
+isn't showing up under its expected name (e.g. right after a fresh flash or
+with an unusual advertising state). Entries whose name matches the expected
+one are marked so the real target is still easy to spot among the noise.
 Distinguished by name (if any) + address + signal strength (RSSI).
 
-The chosen address is remembered for the session (module-level). Phases 4 and 5
-connect to it if set, otherwise they fall back to "first bracelet found".
+Originally bracelet-only (BraceletSelectorDialog); generalized into
+DeviceSelectorDialog so the robotic hand can reuse the same scan-and-pick UI
+(see pair_hand_screen.py) instead of typing a MAC/name in by hand. Bracelet
+and hand selections are stored separately - picking one never clears the
+other.
 
-Note: on macOS the address is a per-host UUID that can change between sessions,
-so the choice is per-session by design.
+The chosen address is remembered for the session (module-level). Callers
+fall back to "first device matching the expected name" if nothing was
+explicitly chosen.
+
+Note: on macOS the address is a per-host UUID that can change between
+sessions, so the choice is per-session by design.
 """
 import asyncio
 
@@ -28,7 +35,8 @@ except ImportError:
 
 DEVICE_NAME = "ESP32S3_FAST_BLE"
 
-_selected_address = None
+_selected_address = None       # bracelet
+_selected_hand_address = None  # robotic hand
 
 
 def get_selected():
@@ -43,6 +51,20 @@ def set_selected(address):
 def clear_selected():
     global _selected_address
     _selected_address = None
+
+
+def get_selected_hand():
+    return _selected_hand_address
+
+
+def set_selected_hand(address):
+    global _selected_hand_address
+    _selected_hand_address = address
+
+
+def clear_selected_hand():
+    global _selected_hand_address
+    _selected_hand_address = None
 
 
 class _ScanWorker(QThread):
@@ -66,22 +88,40 @@ class _ScanWorker(QThread):
         for address, (dev, adv) in discovered.items():
             name = dev.name or (adv.local_name if adv else None) or ""
             # No name filter - show every BLE device in range so the user can
-            # debug a bracelet that isn't advertising under DEVICE_NAME.
+            # debug a target that isn't advertising under its expected name.
             items.append((name, address, adv.rssi if adv else -999))
         items.sort(key=lambda t: t[2], reverse=True)   # strongest signal first
         return items
 
 
-class BraceletSelectorDialog(QDialog):
-    def __init__(self, parent=None):
+class DeviceSelectorDialog(QDialog):
+    """Generic "scan and pick a BLE device" dialog.
+
+    `expected_name` + `match_mode` only control the ★ hint next to matching
+    entries - every nearby device is still listed, so a target that isn't
+    advertising under the expected name can still be found and picked.
+    `match_mode="exact"` requires an exact name match (bracelet); "prefix"
+    does a case-insensitive startswith (hand - its module name can vary).
+
+    `get_selected_fn`/`set_selected_fn` point at whichever module-level slot
+    (bracelet vs hand) this instance should read/write.
+    """
+
+    def __init__(self, expected_name, title, get_selected_fn, set_selected_fn,
+                 match_mode="exact", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Choose bracelet")
+        self._expected_name = expected_name
+        self._match_mode = match_mode
+        self._get_selected = get_selected_fn
+        self._set_selected = set_selected_fn
+
+        self.setWindowTitle(title)
         self.setStyleSheet("QDialog { background:#0e1422; }")
         self.setMinimumSize(560, 460)
         self._worker = None
 
         outer = QVBoxLayout(self)
-        self._title = QLabel("Scanning for bracelets...")
+        self._title = QLabel("Scanning for devices...")
         self._title.setStyleSheet(
             "color:#ffffff; font-size:14px; font-weight:800; border:none;")
         outer.addWidget(self._title)
@@ -114,6 +154,11 @@ class BraceletSelectorDialog(QDialog):
 
         self._start_scan()
 
+    def _matches(self, name):
+        if self._match_mode == "exact":
+            return name == self._expected_name
+        return name.lower().startswith(self._expected_name.lower())
+
     def _btn_grey(self):
         return ("QPushButton { background:#2a3550; color:#e6e9f2; border:none;"
                 " border-radius:6px; padding:8px 14px; }")
@@ -126,7 +171,7 @@ class BraceletSelectorDialog(QDialog):
 
     def _start_scan(self):
         self._clear_list()
-        self._title.setText("Scanning for bracelets...")
+        self._title.setText("Scanning for devices...")
         self._rescan_btn.setEnabled(False)
         self._worker = _ScanWorker()
         self._worker.done.connect(self._on_results)
@@ -144,13 +189,13 @@ class BraceletSelectorDialog(QDialog):
             self._title.setText(
                 "No BLE devices found nearby. Check Bluetooth is on and rescan.")
             return
-        current = get_selected()
+        current = self._get_selected()
         self._title.setText(
             f"{len(items)} BLE device(s) found - closest first "
-            f"(★ = expected bracelet name):")
+            f"(★ = expected '{self._expected_name}'):")
         for name, address, rssi in items:
             mark = "  (current)" if address == current else ""
-            star = "★ " if name == DEVICE_NAME else ""
+            star = "★ " if self._matches(name) else ""
             display_name = name or "(no name)"
             btn = QPushButton(f"{star}{display_name}    RSSI {rssi} dBm    {address}{mark}")
             btn.setStyleSheet(
@@ -161,9 +206,25 @@ class BraceletSelectorDialog(QDialog):
             self._holder.addWidget(btn)
 
     def _choose(self, address):
-        set_selected(address)
+        self._set_selected(address)
         self.accept()
 
     def _use_any(self):
-        clear_selected()
+        self._set_selected(None)
         self.accept()
+
+
+class BraceletSelectorDialog(DeviceSelectorDialog):
+    def __init__(self, parent=None):
+        super().__init__(
+            DEVICE_NAME, "Choose bracelet",
+            get_selected, set_selected,
+            match_mode="exact", parent=parent)
+
+
+class HandSelectorDialog(DeviceSelectorDialog):
+    def __init__(self, expected_name, parent=None):
+        super().__init__(
+            expected_name, "Choose robotic hand",
+            get_selected_hand, set_selected_hand,
+            match_mode="prefix", parent=parent)

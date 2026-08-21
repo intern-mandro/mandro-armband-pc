@@ -12,6 +12,7 @@ Public API (unchanged for back-compat with load_session wiring):
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -35,6 +36,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from lib import firmware_uploader as fu  # noqa: E402
 from lib import ble_weights as bw  # noqa: E402
+import ble_diagnostics as bd  # noqa: E402
 import ble_selection  # noqa: E402
 
 
@@ -86,45 +88,48 @@ class BleWeightsWorker(QThread):
     def __init__(self, model_path, parent=None):
         super().__init__(parent)
         self.model_path = model_path
+        self._t0 = None
+
+    def _log(self, msg):
+        """Prefix every progress line with elapsed time since this transfer
+        started, so a slow/stuck step (a weak-signal scan, a stalled
+        connect, a chunk that's taking too long) is visible directly in
+        the log instead of having to guess from wall-clock gaps."""
+        elapsed = time.monotonic() - self._t0
+        self.progress.emit(f"[+{elapsed:5.1f}s] {msg}")
 
     def run(self):
+        self._t0 = time.monotonic()
         try:
             asyncio.run(self._run_async())
+            self._log(f"Done - total {time.monotonic() - self._t0:.1f}s")
             self.finished_ok.emit()
-        except bw.BleWeightsError as exc:
+        except (bw.BleWeightsError, bd.BleConnectError) as exc:
+            self._log(f"Failed after {time.monotonic() - self._t0:.1f}s total")
             self.failed.emit(str(exc))
         except Exception as exc:
-            self.failed.emit(f"Unexpected error: {exc}")
+            self._log(f"Failed after {time.monotonic() - self._t0:.1f}s total")
+            # str(exc) can be empty for some exceptions (asyncio/TimeoutError
+            # with no message is a common one) - always include the type so
+            # the log never shows a blank "Unexpected error: " with no clue
+            # what actually happened.
+            self.failed.emit(f"Unexpected error: {type(exc).__name__}: {exc}")
 
     async def _run_async(self):
         address = ble_selection.get_selected()
         if not address:
-            self.progress.emit("Scanning for bracelet...")
-            try:
-                from bleak import BleakScanner
-            except ImportError:
-                raise bw.BleWeightsError("bleak is not installed")
-            target = None
-            for attempt in range(1, 4):
-                self.progress.emit(f"Scanning for bracelet... (attempt {attempt}/3)")
-                devices = await BleakScanner.discover(timeout=5.0)
-                target = next((d for d in devices if d.name == ble_selection.DEVICE_NAME), None)
-                if target is not None:
-                    break
-                if attempt < 3:
-                    await asyncio.sleep(1.0)
-            if target is None:
-                raise bw.BleWeightsError(
-                    f"Bracelet '{ble_selection.DEVICE_NAME}' not found after 3 attempts")
-            address = target.address
+            self._log("No bracelet pre-selected - scanning for it")
+            address = await bd.scan_for(
+                ble_selection.DEVICE_NAME, "bracelet", self._log, exact=True)
+        else:
+            self._log(f"Using pre-selected bracelet {address}")
 
-        self.progress.emit(f"Exporting weights from {os.path.basename(self.model_path)}...")
+        self._log(f"Exporting weights from {os.path.basename(self.model_path)}...")
         payload = bw.serialize_weights(self.model_path)
         frame = bw.build_frame(payload)
-        self.progress.emit(f"Payload: {len(payload)} bytes ({len(frame)} bytes on the wire)")
+        self._log(f"Payload: {len(payload)} bytes ({len(frame)} bytes on the wire)")
 
-        await bw.send_weights_ble(
-            address, frame, on_progress=lambda msg: self.progress.emit(msg))
+        await bw.send_weights_ble(address, frame, on_progress=self._log)
 
 
 # ─────────────────────────────────────────────────────────────────────
